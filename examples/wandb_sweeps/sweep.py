@@ -28,23 +28,43 @@ def train_sweep(
         temp_config: temporary configuration file handle.
         argv: command-line arguments.
     """
-    populate_config(config, temp_config)
-    run_sweep(argv)
+    try:
+        populate_config(config, temp_config)
+        exit_code = run_sweep(argv)
+        wandb.finish(exit_code=exit_code)
+    except Exception as e:
+        logging.error("Error in train_sweep: %s", str(e))
+        logging.error("Full traceback: %s", traceback.format_exc())
+        wandb.finish(exit_code=1)
 
 
-def run_sweep(argv: List[str]) -> None:
+def run_sweep(argv: List[str]) -> int:
     """Actually runs the sweep.
 
     Args:
         argv: command-line arguments.
 
+    Returns:
+        int: The exit code from the subprocess. 0 for success, non-zero for failure.
+
     We encapsulate each run by using a separate subprocess, which ought to
     ensure that memory is returned (etc.).
     """
     try:
-        subprocess.check_call(argv)
+        result = subprocess.run(
+            argv,
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        return 0
     except subprocess.CalledProcessError as error:
         logging.error("Subprocess error: %s", error)
+        if error.stdout:
+            logging.error("Process stdout:\n%s", error.stdout)
+        if error.stderr:
+            logging.error("Process stderr:\n%s", error.stderr)
+        return error.returncode
 
 
 def populate_config(
@@ -59,9 +79,14 @@ def populate_config(
         temp_config_handle: temporary configuration file handle.
     """
     wandb.init()
-    for key, value in wandb.config.items():
-        _recursive_insert(config, key, value)
-    yaml.dump(config, temp_config_handle)
+    try:
+        for key, value in wandb.config.items():
+            _recursive_insert(config, key, value)
+        yaml.dump(config, temp_config_handle)
+    except Exception as e:
+        logging.error("Error populating config: %s", str(e))
+        logging.error("Full traceback: %s", traceback.format_exc())
+        wandb.finish(exit_code=1)
 
 
 def _recursive_insert(config: Dict[str, Any], key: str, value: Any) -> None:
@@ -90,13 +115,15 @@ def _recursive_insert(config: Dict[str, Any], key: str, value: Any) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
-    with open(args.config, "r") as source:
-        config = yaml.safe_load(source)
-    # TODO: Consider enabling the W&B logger; we are not sure if things will
-    # unless this is configured.
-    temp_config = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml")
-    argv = ["udtube", "fit", "--config", temp_config.name, *sys.argv[1:]]
     try:
+        with open(args.config, "r") as source:
+            config = yaml.safe_load(source)
+        
+        # TODO: Consider enabling the W&B logger; we are not sure if things will
+        # work unless this is configured.
+        temp_config = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml")
+        argv = ["udtube", "fit", "--config", temp_config.name, *sys.argv[1:]]
+        
         wandb.agent(
             sweep_id=args.sweep_id,
             entity=args.entity,
@@ -104,12 +131,10 @@ def main(args: argparse.Namespace) -> None:
             function=functools.partial(train_sweep, config, temp_config, argv),
             count=args.count,
         )
-    except Exception:
-        # Exits gracefully, so W&B logs the error.
-        logging.fatal(traceback.format_exc())
-        exit(1)
-    finally:
-        wandb.finish()
+    except Exception as e:
+        logging.error("Error in main: %s", str(e))
+        logging.error("Full traceback: %s", traceback.format_exc())
+        wandb.finish(exit_code=1)
 
 
 if __name__ == "__main__":
